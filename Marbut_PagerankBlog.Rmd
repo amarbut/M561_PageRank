@@ -1,0 +1,275 @@
+---
+output:
+  html_document: default
+  word_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+ranks <- read_tsv("sortedPageRank.txt")
+
+ranks <- ranks%>%
+  mutate(num_rank = 1:n())
+```
+#Google PageRank
+##Re-creating the original search ranking algorithm
+
+###TL;DR
+I built a webcrawler to create a mini-internet centered around my university's homepage (www.umt.edu). Then I re-created Larry Page and Sergey Brin's original ranking algorithm to rank all of the pages in the network. Although the webcrawler got a little sidetracked and had a misrepresentative number of pages from Twitter, the ranking algorithm succeeded in ordering the pages in the network based on the number and rank of other pages linking to them.
+
+*Disclaimer: Most of this blog is pulled from a fairly formal final paper that I wrote for school, so the style is a little different than usual.*
+
+###Everyone knows how Google works, right?
+When performing a search on the internet, there are two main components to how the search program displays the results. The first is a text-based component, which may use any one of many similarity algorithms to find results that are similar in content to the user's search query (more about the text part in [this blog](https://annamarbut.blogspot.com/2018/06/semantic-search-in-r-latent-semantic.html) and [this other blog](https://annamarbut.blogspot.com/2018/08/whoosh-pandas-and-redshift-implementing.html) that I wrote this summer). The second component is a ranking algorithm that determines the order in which results are displayed. For example, when a user types the query "machine learning" in Google, 813 million potential matches are returned. However, the first results displayed are those that Google determined to be highest ranking within all of those potential matches. In part, this ranking is determined by the Google PageRank algorithm.
+
+Google PageRank was created by Google founders Sergey Brin and Larry Page while they were still at Stanford as PhD candidates (Mueller et. al, 2017). Somewhat surprisingly, the algorithm is not based upon user behavior, but instead upon the number of links to and from any given page. The theory is that websites are more likely to include links to high quality pages, and so the pages with a large amount of "inlinks" (links from other pages) should be ranked higher in the list of results. Moreover, an "inlink" coming from another highly ranked page should be worth more than one from a low-ranking page (Elden, 2007). Discussed below, methods from linear algebra were applied to the problem to re-create a link-based ranking algorithm.
+
+###How *does* it work, then?
+The Google PageRank algorithm is based almost entirely on concepts from linear algebra. In this model, each page in a network is represented as a vector of navigation probabilities based on the pages linking to/from that page. For example, consider a very simple network of six pages, A through F (Figure 1).
+<center>
+![Figure 1](C:/Users/Anna/Documents/MSBA/Advance Data Science/PageRank_Small.png)
+
+</center>
+
+Each arrow represents a link from one page to another. Based on this network, if a user starts on page A and navigates the network only through clicking links on the pages, she has a probability of 1/3 of navigating to page B, D, or E. Calculating these probabilities for every page in the network results in the matrix seen in Figure 2. 
+
+<center>
+![Figure 2](C:/Users/Anna/Documents/MSBA/Advance Data Science/PageRankMatrix_Start.png)
+
+</center>
+This matrix can be used to imagine any number of network browsers, following links from page to page. With the sample network here, however, all of the users will eventually get "stuck" on page F, since this page does not have any outlinks. But instead of getting stuck, a user would more likely navigate from that page directly to any other page in the network, giving each page in that vector an equal probability of 1/n (in this example, column F would be filled with 1/6  in every row). 
+  
+Along the same lines, the probability matrix should also account for some chance that a user  directly navigates to any other page at random while they browse the network of pages. This is often termed the teleportation or damping factor (d), and is assigned a value such that a user has d probability of following the links on the pages, and a 1-d probability of randomly navigating within the network. Equation 1 shows how this is applied to the network probability matrix L, where t is an n x n matrix of $\frac{(1-d)}{n}$.  A common value for this teleportation factor is 0.85, and Figure 3 shows matrix L after applying this factor.
+<center>
+$M = d*L+t$&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(Equation 1)
+
+![Figure 3](C:/Users/Anna/Documents/MSBA/Advance Data Science/PageRankMatrix_Damp.png)
+
+</center>
+
+To produce a vector of ranks for every page in the network which is based both on this matrix of probabilities and on the rank of the pages themselves, consider Equation 1, in which r is the rank vector, and M is the probability matrix.
+
+<center>
+$r=Mr$&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(Equation 2)
+</center>
+
+Since r needs to be the same on both sides of the equation, this can be seen as an eigenvector problem. An eigenvector is a vector which does not change direction when a transformation matrix is applied to it, and an eigenvector with an eigenvalue of one is a vector that does not change direction or value when a transformation matrix is applied to it. Thus, the goal of the PageRank algorithm is to find an eigenvector with an eigenvalue of one for the "transformation matrix" that we create based on the linking probabilities determined above.
+
+For a small network, such as the six-page network in this example, it would not be too difficult to calculate this eigenvector by hand. However, for a much larger network (the whole internet, for example), hand calculation is not practical or even possible. Returning back to Equation 2, the PageRank vector r can instead be found by arbitrarily assigning a starting value to r, and then iteratively multiplying r by the probability matrix M until it no longer changes in value (Cooper, 2017). This method is often called Power Iteration, and thus, the equation can be rewritten as seen in Equation 3.
+
+<center>
+$r^{i+1}=Mr^i$&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(Equation 3)
+</center>
+
+A common starting rank vector assumes that all pages are equal in rank, so for this example network the starting vector r would be [1/6, 1/6, 1/6, 1/6, 1/6, 1/6]. Iteratively multiplying this vector by the probability matrix M, it takes 8 iterations before $r^i$ and $r^{i+1}$ converge. This results in the rank vector [0.227, 0.162, 0.089, 0.162, 0.153, 0.208]. Comparing this to the sample network in Figure 1 and the original probability matrix in Figure 2, it makes sense that pages A and F would be the highest ranking in the network. Page A has two in-links, one of which starts with a link probability of one, and page F is the only page with three inlinks. On the other hand, page C only has one in-link, so it makes sense that it is the lowest ranking page in the network.
+
+###Let's try it on a real(er) network!
+
+The first step to creating a functioning model of the PageRank algorithm is to create a model network for the algorithm to run on. This was done by creating a webcrawler using the python packages `requests` and `lxml.html`. This webcrawler is fed a starting url, for which it pulls the page's html code and collects all of the page's outlinks. The webcrawler then iterates over each of these outlink urls, pulling each of these pages' outlinks as well. For the purpose of this exercise, a limit was set for the webcrawler to stop after collecting outlinks from 502 unique urls. The complete code for the webcrawler can be found [on my Github](https://github.com/amarbut/NetworkBuilding_Webcrawler). The starting url used for this project was www.umt.edu.
+
+The result of running the webcrawler is a python dictionary with 502 url keys, each with a list of outlink urls as their dictionary value. Starting with www.umt.edu and pulling the outlinks for 502 pages resulted in a list of almost 5000 unique urls. Since the Pagerank algorithm requires a square matrix (ie. every crawled page needs to be on both the x and y axes of the matrix), each list of outlinks needed to be filtered for urls that had been crawled. Then these lists were broken into link-outlink pairs and added to a 2-column `pandas.DataFrame`.
+```{}
+#create df of source-outlink pairs, filtering for links that were crawled
+link_df = pd.DataFrame(columns = ['source', 'outlink'])
+for link in outlinks:
+    for outlink in outlinks[link]:
+        if outlink in outlinks:
+            pair = pd.DataFrame([[link, outlink]], columns = ['source', 'outlink'])
+            link_df = pd.concat([link_df, pair], ignore_index = True)
+```
+
+Next, the `pandas.crosstab` function was used to turn the outlink column into a dummy variable, with a value of one if the source page had an outlink to that url, and a zero if not. Because the dataframe only included positive link-outlink pairs, any pages that did not have any outlinks needed to be added separately as a row filled with zeros.
+
+```{}
+#create frequency df of dummy variables for each combination
+sparse_links = pd.crosstab(index = link_df['source'], columns = link_df['outlink'])
+
+#include pages crawled with no outlinks, or with no outlinks to other pages crawled
+for link in outlinks:
+    if link not in sparse_links.index:
+        new_row = pd.DataFrame([[0]*502], index = [link], columns = sparse_links.columns)
+        sparse_links = pd.concat([sparse_links, new_row])
+```
+To calculate the navigation probability (before adding the teleportation factor) for each row, positive outlinks (currently with a value of one) were divided by the total number of outlinks on that page, and pages without any outlinks were filled with equal probabilities for all pages (1/502)
+
+```{}
+# replace row values with link probability (ie. 1/number of outlinks from page)
+for link in sparse_links.index:
+    try:
+        prob = 1/len([i for i in outlinks[link] if i in sparse_links.index])
+        sparse_links[(sparse_links.index == link)] *= prob
+    #fill empty rows with equal probabilities
+    except ZeroDivisionError:
+        sparse_links[(sparse_links.index == link)] = [[1/502]*502]
+        pass
+```
+The final step in creating the network's transformation matrix of navigation probabilities is to include the teleportation (or damping) factor. For this, the dataframe was converted to a `numpy.array`, first saving the row and column indices in a dictionary for later use. Equation 1 was then used to apply a damping factor of 0.85 to the entire matrix.
+
+```{}
+#reorder columns to be in the same order as rows
+row_order = sparse_links.index.tolist()
+sparse_links = sparse_links[row_order]
+
+#convert dataframe to np array
+#save row and column names in dictionary
+
+sources ={}
+for idx, source in enumerate(sparse_links.index):
+    sources[idx] = source
+
+# convert to array with sources as columns (ie. all columns sum to 1)
+linkArray = sparse_links.values.T
+
+#add teleportation operation
+d = 0.85
+withTeleport = d * linkArray + (1-d)/502 * np.ones([502, 502]) 
+```
+
+Now that the transformation matrix is formatted correctly, it can be applied to a starting rank vector (with equal rank for all pages) using the power iteration method. This method will continue to loop, iteratively multiplying the rank vector by the transformation matrix until the values converge. Because the ranks start out so small (`r 1/502`), the measure for convergence is a change of less than 0.00001 (or 0.5%).
+
+```{}
+#use power-iteration method to find pagerank eigenvector with eigenvalue of 1
+# Sets up starting pagerank vector with equal rank for all pages
+r = np.ones(502) / 502 
+lastR = r
+
+# calculate dot-product of transformation matrix (computed by link 
+# probabilities and teleportation operation) and pagerank vector r
+r = withTeleport @ r
+i = 0 #count the number of iterations until convergence
+
+#break loop once pagerank vector changes less than 0.0001
+while np.linalg.norm(lastR - r) > 0.00001 :
+    lastR = r
+    r = withTeleport @ r
+    i += 1
+print(str(i) + " iterations to convergence.")
+
+```
+
+###How'd we do?
+
+With this relatively small network of 502 websites, the PageRank algorithm shown above needed to iterate 25 times before reaching convergence at a threshhold of 0.00001. Since the resulting rank vector is an unlabelled and unsorted vector of 502 numbers, this vector needed to be matched back up with the page urls and then sorted from high to low.
+
+```{}
+# match pagerank vector back up with source url labels
+rankedUrls = []
+for i in sources:
+    pair = (sources[i], r[i])
+    rankedUrls.append(pair)
+
+# sort urls by pagerank to find highest ranking pages
+sortedRank = sorted(rankedUrls, key = lambda tup: tup[1], reverse = True)
+```
+
+To explore the resulting ranks further, the number of inlinks to each page was calculated. Then the page url, rank, and number of inlinks were exported to a .txt file and loaded into R for visualization.
+
+```{}
+#count inlinks
+inlinks = {}
+for page in outlinks:
+    counter = 0
+    for other_page in outlinks:
+        if page in outlinks[other_page]:
+            counter += 1
+    inlinks[page] = counter
+
+#save url, rank, number of inlinks, and number of outlinks to txt file for import into R for visualization
+with open("sortedPageRank.txt", "w", encoding = "utf-8") as file:
+    headers = ["url", "rank", "num_in"]
+    file.write("\t".join(headers)+"\n")
+    for pair in sortedRank:
+        url, rank = pair
+        num_in = inlinks[url]
+        row = [url, str(rank), str(num_in)]
+        file.write("\t".join(row)+"\n")
+```
+
+When looking at the density plot of PageRanks, it's apparent that the distribution is strongly right-skewed, with most of the pages having very low ranks and only a few with higher scores spread out along a long right tail. Although not identical, the similarity between the density plot of PageRanks and that of inlinks is unmistakable--an expected result of the relationship between inlinks and rank in the PageRank algorithm.
+
+
+<center>
+```{r, echo = FALSE, fig.height=4, fig.width=4}
+ranks%>%
+  ggplot(aes(x = rank))+
+  geom_density()+
+  labs(title = "Density Plot of PageRanks", x = "PageRank", y = "Density")
+
+ranks%>%
+  ggplot(aes(x = num_in))+
+  geom_density()+
+  labs(title = "Density Plot of Inlinks", x = "Number Inlinks", y = "Density")
+```
+</center>
+
+The tail in the distribution above has a few clumps of pages with similar higher scores. This might suggest that there is some insularity among these higher-ranking pages, meaning that these pages all link to each other, further boosting their ranks. Filtering for the ten highest-ranking pages confirms that this is indeed the case. All of the top ten pages are various Twitter help pages, and going back to the outlink dictionary in Python shows that the inlinks for these pages are all coming from other highly-ranked Twitter help pages. Zooming out a little further in the data, almost all of the 50 highest ranking pages are Twitter help pages.
+
+```{r, echo = FALSE}
+
+kable(ranks%>%
+        top_n(10, rank)%>%
+        head(10)%>%
+        select(Rank = num_rank, Website = url, PageRank = rank, Inlinks = num_in))
+```
+
+Removing any Twitter pages changes the density curve a bit, but the general character remains the same. The highest ranking pages are now missing, and the group of pages that were clumped together at the base of the highest peak on the left are now spread out. Once again, the similarity between the density plots for PageRank and Inlink number is obvious. Also, the data continues to show the same clumping in the tail seen above.
+
+<center>
+```{r, echo = FALSE, fig.height=4, fig.width=4}
+non_twitter <- ranks%>%
+  filter(num_rank >30)%>%
+  filter(!grepl("twitter", url))
+
+non_twitter%>%
+  ggplot(aes(x = rank))+
+  geom_density()+
+  labs(title = "Density Plot of PageRanks without Twitter Pages", x = "PageRank", y = "Density")
+
+non_twitter%>%
+  ggplot(aes(x = num_in))+
+  geom_density()+
+  labs(title = "Density Plot of Inlinks without Twitter", x = "Number Inlinks", y = "Density")
+```
+</center>
+
+With the Twitter pages removed, the ten highest ranking pages are now more resemblant of what one expects from a network centered around the starting page *http://www.umt.edu *. Various spellings of that starting page are all ranked highly, and the other highly ranked pages (from *olark.com*) are all related to the university's chatbot, which is present on many of the university's main landing pages. Filtering further to remove the chatbot pages, the top ranking pages are all major pages on the university site or social media accounts associated with the university. 
+
+```{r, echo = FALSE}
+non_olark <- non_twitter%>%
+  filter(!grepl("olark", url))
+
+kable(non_olark%>%
+  top_n(10, rank)%>%
+  head(10)%>%
+  select(Rank = num_rank, Website = url, PageRank = rank, Inlinks = num_in))
+```
+
+Looking at the lowest ranking pages instead, they all have only one or two inlinks and many are unique redirect urls. Following the redirects, they mostly lead to various pages for the registrar. It would be interesting to know how these redirect pages would rank if they were grouped instead with the pages that they redirected to.
+
+```{r, echo = FALSE}
+kable(ranks%>%
+  arrange(rank)%>%
+  head(10)%>%
+  select(Rank = num_rank, Website = url, PageRank = rank, Inlinks = num_in))
+```
+
+###What's next?
+
+Although there were issues with the way that this project was designed which affected the resulting PageRanks, the results were indicative of a successful algorithm overall. The highest ranking pages all had many inlinks, mostly from other high-ranking pages, and the lowest ranking pages had only one or two inlinks. The clumping of pages on the density plots demonstrates that the rank of a page is determined not only from the number of inlinks that it has, but from the rank of the pages which link to it. This clumping also illustrates an interesting characteristic of networks in general, which is that a network often consists of pockets of highly-connected entities, which are less strongly connected to other pockets in the network.
+
+Changes to the project design for future work mainly center around the webcrawler. Since the number of pages crawled was limited, the network created for this project was incomplete and biased toward a few pages that were crawled early on in the process, namely the various Twitter help pages. This could be fixed by either expanding the number of pages collected to form the network, or by creating a more methodical way to choose which pages get crawled first (as opposed to the more or less random choice that is currently built into the code). Alternatively, the webcrawler could be designed to only crawl links to certain domains (ie. only looking at *umt.edu* sites), though this would also be a pretty incomplete picture of the link network.
+
+Another change would be to normalize the urls in the network before running the PageRank algorithm. As built by the webcrawler, the network has duplicate pages with minor spelling changes (ie. *http://www.umt.edu * vs *http://www.umt.edu/ * vs *https://www.umt.edu *). Similarly, many of the lowest ranking pages were redirects to pages that were also in the network. If these pages were all grouped together, this might make a significant difference in the resulting PageRanks.
+
+These changes aside, the PageRank algorithm recreated for this project worked as well as could be expected on the faulty network it was provided. The power iteration method was used to perform iterative matrix multiplication on a transformation matrix weighted by a page's number of inlinks and outlinks. This resulted in a vector of ranks for every page in the network which was based on the number and rank of other pages in the network that linked to it. When used in combination with a text-matching algorithm, this vector of ranks would drive the order of search results presented to a search user.
+
+<center>
+##References
+</center>
+
+Cooper, Samuel J. "PageRank". Introduction to Linear Algebra and to Mathematics for Machine Learning, Imperial College London, Coursera. Received 16 Dec. 2017. Course Handout.
+
+Eldén Lars. Matrix Methods in Data Mining and Pattern Recognition. Society for Industrial and Applied Mathematics, 2007.
+
+Mueller, John, and Luca Massaron. Algorithms for Dummies. Wiley Publishing, Inc., 2017.
